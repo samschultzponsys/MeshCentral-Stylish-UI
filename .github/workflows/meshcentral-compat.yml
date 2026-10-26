@@ -1,0 +1,142 @@
+name: MeshCentral compatibility
+
+# Runs Stylish UI on a real MeshCentral server and checks it in a browser (tests/smoke-test.js).
+# By default it tests the latest MeshCentral release from npm and the master branch of Ylianst/MeshCentral,
+# and runs weekly to catch MeshCentral changes. Run it manually to test any MeshCentral repository and branch.
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: '23 5 * * 1' # Mondays 05:23 UTC
+  workflow_dispatch:
+    inputs:
+      meshcentral_repository:
+        description: 'MeshCentral repository to test against (owner/name)'
+        default: 'Ylianst/MeshCentral'
+      meshcentral_ref:
+        description: 'Branch, tag or commit to test against. Leave empty to test the latest release and master.'
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  targets:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set.outputs.matrix }}
+    steps:
+      - id: set
+        env:
+          REPO: ${{ inputs.meshcentral_repository }}
+          REF: ${{ inputs.meshcentral_ref }}
+        run: |
+          if [ -n "$REF" ]; then
+            echo "matrix=$(jq -cn --arg repo "${REPO:-Ylianst/MeshCentral}" --arg ref "$REF" '[{name: ($repo + "@" + $ref), source: "git", repository: $repo, ref: $ref}]')" >> "$GITHUB_OUTPUT"
+          else
+            echo 'matrix=[{"name":"latest release","source":"npm"},{"name":"Ylianst/MeshCentral@master","source":"git","repository":"Ylianst/MeshCentral","ref":"master"}]' >> "$GITHUB_OUTPUT"
+          fi
+
+  smoke-test:
+    needs: targets
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.targets.outputs.matrix) }}
+    name: MeshCentral ${{ matrix.target.name }}
+    steps:
+      - name: Checkout Stylish UI
+        uses: actions/checkout@v5
+        with:
+          path: stylish
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22.x'
+
+      # MeshCentral looks for meshcentral-data and meshcentral-web next to its install folder,
+      # so both layouts below end up using server/meshcentral-data and server/meshcentral-web.
+      - name: Install MeshCentral from npm
+        if: matrix.target.source == 'npm'
+        run: |
+          mkdir -p server && cd server
+          npm install --no-audit --no-fund meshcentral
+          echo "MESHCENTRAL_DIR=$PWD/node_modules/meshcentral" >> "$GITHUB_ENV"
+
+      - name: Checkout MeshCentral
+        if: matrix.target.source == 'git'
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ matrix.target.repository }}
+          ref: ${{ matrix.target.ref }}
+          path: server/meshcentral
+
+      - name: Install MeshCentral from git
+        if: matrix.target.source == 'git'
+        run: |
+          cd server/meshcentral
+          npm ci --no-audit --no-fund
+          echo "MESHCENTRAL_DIR=$PWD" >> "$GITHUB_ENV"
+
+      - name: Install Stylish UI
+        run: cp -r stylish/meshcentral-web server/meshcentral-web
+
+      - name: Start MeshCentral
+        run: |
+          MESHCENTRAL_PASS="Smoke-$(openssl rand -hex 12)"
+          echo "::add-mask::$MESHCENTRAL_PASS"
+          echo "MESHCENTRAL_PASS=$MESHCENTRAL_PASS" >> "$GITHUB_ENV"
+          echo "MeshCentral version: $(jq -r .version "$MESHCENTRAL_DIR/package.json")"
+          mkdir -p server/meshcentral-data
+          cat > server/meshcentral-data/config.json <<'EOF'
+          {
+            "settings": { "cert": "localhost", "port": 4430, "redirPort": 0, "selfUpdate": false, "agentTimeStampServer": false },
+            "domains": { "": { "siteStyle": 3 } }
+          }
+          EOF
+          cd "$MESHCENTRAL_DIR"
+          node meshcentral.js --createaccount admin --pass "$MESHCENTRAL_PASS" --email admin@example.com
+          node meshcentral.js --adminaccount admin
+          nohup node meshcentral.js > "$RUNNER_TEMP/meshcentral.log" 2>&1 &
+          for i in $(seq 1 180); do
+            if grep -q "HTTPS server running" "$RUNNER_TEMP/meshcentral.log"; then exit 0; fi
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/meshcentral.log"
+          exit 1
+
+      - name: Install Playwright
+        working-directory: stylish
+        run: |
+          npm install --no-save --no-audit --no-fund playwright@1.63.0
+          npx playwright install --with-deps chromium
+
+      - name: Smoke test
+        working-directory: stylish
+        env:
+          MESHCENTRAL_URL: https://localhost:4430
+          MESHCENTRAL_USER: admin
+          SCREENSHOT_DIR: ${{ runner.temp }}/screenshots
+        run: node tests/smoke-test.js
+
+      - name: Check metadata/compat.json
+        if: matrix.target.source == 'npm'
+        run: |
+          version=$(jq -r .version "$MESHCENTRAL_DIR/package.json")
+          if ! jq -e --arg v "$version" '.compatibility[] | select(.meshcentral == $v)' stylish/metadata/compat.json > /dev/null; then
+            echo "::warning title=compat.json::MeshCentral $version passes the smoke test but has no entry in metadata/compat.json, so the MeshCentral Docker image won't install Stylish UI for it (INSTALL_STYLISHUI)."
+          fi
+
+      - name: Upload screenshots and server log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: smoke-test-${{ strategy.job-index }}
+          path: |
+            ${{ runner.temp }}/screenshots
+            ${{ runner.temp }}/meshcentral.log
+          if-no-files-found: ignore

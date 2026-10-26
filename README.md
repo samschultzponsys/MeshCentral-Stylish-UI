@@ -253,6 +253,19 @@ networks:
 
 ---
 
+## 🧪 Compatibility Testing
+
+The **MeshCentral compatibility** workflow (`.github/workflows/meshcentral-compat.yml`) installs Stylish UI on a real MeshCentral server and checks it in a browser with `tests/smoke-test.js`, in light and dark mode: Stylish UI loads, the page has no script errors, and the remote desktop settings dialog and notifications work.
+
+- It runs on every push and pull request, and weekly, against the latest MeshCentral release and the `master` branch of Ylianst/MeshCentral.
+- Run it manually from the Actions tab to test any MeshCentral repository and branch.
+- When the latest release passes but is missing from `metadata/compat.json`, the run shows a warning, since the MeshCentral Docker image uses that file to pick the Stylish UI version to install.
+- Screenshots and the server log are attached to each run.
+
+To run the test against your own server: `npm install playwright && npx playwright install chromium`, then `MESHCENTRAL_URL=https://localhost:443 MESHCENTRAL_USER=admin MESHCENTRAL_PASS=... node tests/smoke-test.js`. Use a test server: the test logs in and shows a test notification.
+
+---
+
 ## 🧠 Notes
 
 - The `custom.css` file is safe to overwrite at any time.  
