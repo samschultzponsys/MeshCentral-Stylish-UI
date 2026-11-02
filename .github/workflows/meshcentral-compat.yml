@@ -95,7 +95,7 @@ jobs:
           cat > server/meshcentral-data/config.json <<'EOF'
           {
             "settings": { "cert": "localhost", "port": 4430, "redirPort": 0, "selfUpdate": false, "agentTimeStampServer": false },
-            "domains": { "": { "siteStyle": 3 } }
+            "domains": { "": { "siteStyle": 3, "remotePrinting": { "enabled": true } } }
           }
           EOF
           cd "$MESHCENTRAL_DIR"
